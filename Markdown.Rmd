@@ -1,0 +1,252 @@
+---
+title: "Clustering Consumer Spending Patterns"
+output: html_document
+---
+**SAGAR VINODABABU**
+SV2414@columbia.edu
+
+*This is an R-Markdown Document. Source Code has been included.* 
+
+```{r, echo=FALSE}
+#setwd("...")
+if(!require(plyr)) 
+  install.packages("plyr")
+library(plyr)
+if(!require(ggplot2)) 
+  install.packages("ggplot2")
+library(ggplot2)
+if(!require(stats)) 
+  install.packages("stats")
+library(stats)
+if(!require(fpc)) 
+  install.packages("fpc")
+library(fpc)
+if(!require(cluster)) 
+  install.packages("cluster")
+library(cluster)
+```
+
+I am assuming that the client is a conglomerate with interests in several broad consumer markets. The goal is to assess consumer survey data to find spending potentials across various parameters.
+
+Consumer expenditure survey data and price indices for the 90s are first imported. In the consumer survey data, I choose to use the following features: the year and quarter, the age of the responent, the size of the respondent's household, the number of children in the household under the age of 15, the number of earners in the household, the income of the respondent and spouse (if any), and total expenditures on food (outside of home), clothing, alcohol/tobacco, transport, entertainment/recreation, drugs, rent and utilities. I have chosen these features to adequately represent the structure of the household, while maintaining a dataset that is continuous. 
+
+All expenditures are **adjusted for inflation to the 2000 dollar** using the price indices for the corresponding segments. A summary of the adjusted consumer survey data is shown:
+
+```{r, echo=FALSE}
+#Read consumer survey data, if not already read
+if(!(exists("CSdata_temp"))){
+  CSdata_temp<-read.csv("Data_consumer_expenditure_survey.csv")
+}
+#Read price index data, if not already read
+if(!(exists("PIdata_temp"))){
+  PIdata_temp<-read.csv("Data_Supplementary_price.csv")
+}
+#Remove features I don't need from consumer survey and price index data
+CSdata<-CSdata_temp[, c(166,167,2,170,13,14,51,180,203,189,205,207,208,209,210,211,213,93)]
+PIdata<-PIdata_temp[, c(1,2,4,5,10,11,12,14,17,20,21,22,23,25,26,27,28,29,33)]
+
+#Consolidate split categories (by median since it's skewed), remove unwanted features and adjust to 2000 dollar
+for (i in 1:nrow(PIdata)){
+PIdata$utilities[i]=median(c(PIdata$homefuel_price[i],PIdata$elect_price[i],PIdata$gas_price[i],PIdata$water_price[i]))
+PIdata$food[i]=PIdata$foodout_price[i]
+PIdata$alctob[i]=median(c(PIdata$alcohol_price[i],PIdata$tobacco_price[i]))
+PIdata$transport[i]=median(c(PIdata$gasoline_price[i],PIdata$carservs_price[i],PIdata$airfare_price[i],PIdata$othtrans_price[i],PIdata$masstran_price[i]))
+}
+PIdata<-PIdata[,-c(4:8,10:18)]
+PIdata[3:9]=100.0/PIdata[3:9]
+
+#Adjust expenditures in consumer survey data to 2000 $
+for (i in 1:nrow(CSdata)){
+  CSdata$foodaway[i]=CSdata$foodaway[i]*PIdata$food[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$rent[i]=CSdata$rent[i]*PIdata$renthome_price[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$clothes_pcare[i]=CSdata$clothes_pcare[i]*PIdata$clothes_price[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$utility[i]=CSdata$utility[i]*PIdata$utilities[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$transport[i]=CSdata$transport[i]*PIdata$transport[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$alc_tob[i]=CSdata$alc_tob[i]*PIdata$alctob[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$ent[i]=CSdata$ent[i]*PIdata$all_price[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$drugs[i]=CSdata$drugs[i]*PIdata$all_price[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+  CSdata$income[i]=CSdata$income[i]*PIdata$all_price[PIdata$year==CSdata$year[i] & PIdata$quarter==CSdata$quarter[i]]
+}
+CSdata$income[CSdata$income<0]<-0
+CSdata$drugs[CSdata$drugs<0]<-0
+CSdata$wage_spouse[CSdata$wage_spouse=="\\N"]<-0
+CSdata$wage_spouse<-as.numeric(as.character(CSdata$wage_spouse))
+CSdata$income<-CSdata$income+CSdata$wage_spouse
+CSdata$hrswkd<-CSdata$hrswkd*CSdata$wkswkd
+CSdata<-CSdata[,-c(1,2,5,6,10)]
+names(CSdata)<-c("Age","HHsize","No_earners","No_under15","Income","Food","Rent","Clothes","Utilities","Transport","Alc_Tob","Ent","Drugs")
+
+#Summary
+summary(CSdata)
+```
+
+Since I am dealing with a large, unlabeled dataset, I choose to perform **unsupervised learning with clustering** and not classification or regression. I will employ a partitioning cluster method using **k-Means** because of its simplicity, speed and scalability for datasets ~ 10k samples. 
+
+In choosing an optimal number of clusters, I found that there is no unambiguous elbow in the plot for a within-cluster sum-of-squares (WSS). 
+
+```{r, echo=FALSE}
+#Scale relevant data
+df<-scale(CSdata[,c(1:13)])
+reldata<-CSdata[,c(1:13)]
+
+#Define function to create WSS plot
+wssplot <- function(data, nc=15, seed=1234){
+  wss <- (nrow(data)-1)*sum(apply(data,2,var))
+  for (i in 2:nc){
+    set.seed(seed)
+    wss[i] <- sum(kmeans(data, centers=i,iter.max=30)$withinss)}
+  plot(1:nc, wss, type="b", xlab="Number of Clusters",
+       ylab="Within groups sum of squares")}
+
+#Plot
+wssplot(df)
+```
+
+Since this does not suggest an appropriate number of clusters and the function NbClust (which may also be used) takes too long to run, I choose a **cluster size of k=3** (after some experimentation).
+
+We find that consumers are split into 3 distinct clusters with unique spending and household structure patterns:
+
+```{r, echo=FALSE}
+#Cluster
+fit<- kmeans(df, 3)
+print("The 3 clusters:")
+plotcluster(reldata, fit$cluster, xlab="Discriminant 1", ylab="Discrominant 2")
+print("Plot of relationships between pairs in the 3 clusters:")
+with(reldata, pairs(reldata, col=c(1:ncol(reldata))[fit$cluster])) 
+print("Sizes of  the 3 clusters:")
+fit$size
+print("Means of the 3 clusters")
+aggregate(reldata, by=list(cluster=fit$cluster), mean)
+```
+
+**Cluster 1 (Black):** This is the youngest group with a mean responder age ~ 40. These households have between one and two kids under the age of 15, and are therefore larger in size. They have approximately 2 earners per household. This is a medium income group, and spends moderately.
+
+**Cluster 2 (Red):** This group has a mean responder age ~ 48. They have between 0 and 1 kids under the age of 15, and about 3 members per household. These have just over 2 earners per household, but earn significantly more than their Cluster 1 counterparts and spends much more. 
+
+**Cluster 3 (Green):** This is the oldest group with a mean responder age ~ 56. They have no kids under the age of 15 and between 1 and 2 members per household. They are a lower income group and have just one earner per household. 
+
+###**The following observations can be made about which groups to target in a marketing campaign or for a consumer product:**
+
+**1. The relative sizes of Clusters 1, 2 and 3 are 2:1:3.**
+
+**2. Cluster 2 spends between 3 to 4 times more on food outside their homes than Clusters 1 and 3. It also spends about 2 to 3 times more on transportation and moving around.**
+
+**3. Despite the income difference between Clusters 1 and 3, they spend close to the same on rent. However, Cluster 1 spends more on utilities. (Cluster 2 spends a lot more on both.)**
+
+**4. For the segments of clothes, entertainment and alcohol/tobacco, there is a niche high-end market for the smaller sized Cluster 2, and a large lower-end market for Clusters 1 and 3.**
+
+**5. The older and larger Cluster 3 spends the most on drugs - nearly twice as much as the young Cluster 1.** 
+
+*POSTSCRIPT/NOTES:* 
+
+Clustering on individual segments can also be done, and agree fairly with the clusters obtained above for all segments:
+
+*For Income:*
+```{r, echo=FALSE}
+#Income
+df<-scale(CSdata[,c(1:5)])
+reldata<-CSdata[,c(1:5)]
+fit.inc <- kmeans(df, 3)
+print("Sizes:")
+fit.inc$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.inc$cluster), mean)
+```
+*For Food:*
+```{r, echo=FALSE}
+#Food
+df<-scale(CSdata[,c(1:6)])
+reldata<-CSdata[,c(1:6)]
+fit.food <- kmeans(df, 3)
+print("Sizes:")
+fit.food$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.food$cluster), mean)
+```
+*For Rent:*
+```{r, echo=FALSE}
+#Rent
+df<-scale(CSdata[,c(1:5,7)])
+reldata<-CSdata[,c(1:5,7)]
+fit.rent <- kmeans(df, 3)
+print("Sizes:")
+fit.rent$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.rent$cluster), mean)
+```
+*For Utilities:*
+```{r, echo=FALSE}
+#Utilities
+df<-scale(CSdata[,c(1:5,9)])
+reldata<-CSdata[,c(1:5,9)]
+fit.util <- kmeans(df, 3)
+print("Sizes:")
+fit.util$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.util$cluster), mean)
+```
+*For Clothing:*
+```{r, echo=FALSE}
+#Clothing
+df<-scale(CSdata[,c(1:5,8)])
+reldata<-CSdata[,c(1:5,8)]
+fit.cloth <- kmeans(df, 3)
+print("Sizes:")
+fit.cloth$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.cloth$cluster), mean)
+```
+*For Transport:*
+```{r, echo=FALSE}
+#Transport
+df<-scale(CSdata[,c(1:5,10)])
+reldata<-CSdata[,c(1:5,10)]
+fit.trans <- kmeans(df, 3)
+print("Sizes:")
+fit.trans$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.trans$cluster), mean)
+```
+*For Alcohol/Tobacco*
+```{r, echo=FALSE}
+#Alcohol/Tobacco
+df<-scale(CSdata[,c(1:5,11)])
+reldata<-CSdata[,c(1:5,11)]
+fit.alctob <- kmeans(df, 3)
+print("Sizes:")
+fit.alctob$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.alctob$cluster), mean)
+```
+*For Entertainment:*
+```{r, echo=FALSE}
+#Entertainment
+df<-scale(CSdata[,c(1:5,12)])
+reldata<-CSdata[,c(1:5,12)]
+fit.ent <- kmeans(df, 3)
+print("Sizes:")
+fit.ent$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.ent$cluster), mean)
+```
+*For Drugs:*
+```{r, echo=FALSE}
+#Drugs
+df<-scale(CSdata[,c(1:5,13)])
+reldata<-CSdata[,c(1:5,13)]
+fit.drugs <- kmeans(df, 3)
+print("Sizes:")
+fit.drugs$size
+print("Means:")
+aggregate(reldata, by=list(cluster=fit.drugs$cluster), mean)
+```
+
+
+
+
+
+
+
+
+
+
